@@ -11,202 +11,367 @@ _Please note: MWAA/AWS/DAG/Plugin issues should be raised through AWS Support or
 _Please note: The dynamic configurations which are dependent on the class of an environment are
 aligned with the Large environment class in this repository._
 
-## About the CLI
+# Complete Setup Guide: AWS MWAA Local Runner with Colima on macOS
 
-The CLI builds a Docker container image locally that’s similar to a MWAA production image. This allows you to run a local Apache Airflow environment to develop and test DAGs, custom plugins, and dependencies before deploying to MWAA.
-
-## What this repo contains
-
-```text
-dags/
-  example_lambda.py
-  example_dag_with_taskflow_api.py
-  example_redshift_data_execute_sql.py
-docker/
-  config/
-    airflow.cfg
-    constraints.txt
-    mwaa-base-providers-requirements.txt
-    webserver_config.py
-    .env.localrunner
-  script/
-    bootstrap.sh
-    entrypoint.sh
-    systemlibs.sh
-    generate_key.sh
-  docker-compose-local.yml
-  docker-compose-resetdb.yml
-  docker-compose-sequential.yml
-  Dockerfile
-plugins/
-  README.md
-requirements/
-  requirements.txt
-.gitignore
-CODE_OF_CONDUCT.md
-CONTRIBUTING.md
-LICENSE
-mwaa-local-env
-README.md
-VERSION
-```
+This guide provides step-by-step instructions to set up AWS MWAA Local Runner using Docker with Colima (without Docker Desktop) on macOS.
 
 ## Prerequisites
 
-- **macOS**: [Install Docker Desktop](https://docs.docker.com/desktop/).
-- **Linux/Ubuntu**: [Install Docker Compose](https://docs.docker.com/compose/install/) and [Install Docker Engine](https://docs.docker.com/engine/install/).
-- **Windows**: Windows Subsystem for Linux (WSL) to run the bash based command `mwaa-local-env`. Please follow [Windows Subsystem for Linux Installation (WSL)](https://docs.docker.com/docker-for-windows/wsl/) and [Using Docker in WSL 2](https://code.visualstudio.com/blogs/2020/03/02/docker-in-wsl2), to get started.
+- macOS (Intel or Apple Silicon)
+- Homebrew installed
+- Terminal access
 
-## Get started
+## Step 1: Install Docker and Colima
 
+### 1.1 Install Docker CLI
+```bash
+brew install docker
+```
+
+### 1.2 Install Colima
+```bash
+brew install colima
+```
+
+### 1.3 Install Docker Compose (if not included)
+```bash
+brew install docker-compose
+```
+
+### 1.4 Start Colima
+```bash
+colima start
+```
+
+### 1.5 Verify Installation
+```bash
+# Check Colima status
+colima status
+
+# Check Docker
+docker --version
+docker ps
+
+# Check Docker Compose
+docker-compose --version
+```
+
+Expected output for `colima status`:
+```
+time="..." level=info msg="colima is running using macOS Virtualization.Framework"
+time="..." level=info msg="arch: aarch64"
+time="..." level=info msg="runtime: docker"
+time="..." level=info msg="mountType: sshfs"
+time="..." level=info msg="socket: unix:///Users/username/.colima/default/docker.sock"
+```
+
+## Step 2: Clone and Setup AWS MWAA Local Runner
+
+### 2.1 Clone Repository
 ```bash
 git clone https://github.com/aws/aws-mwaa-local-runner.git
 cd aws-mwaa-local-runner
 ```
 
-### Step one: Building the Docker image
+### 2.2 Validate Prerequisites
+```bash
+./mwaa-local-env validate-prereqs
+```
 
-Build the Docker container image using the following command:
+Expected output:
+```
+Docker is Installed. ✔
+docker-compose is Installed. ✔
+Python3 is Installed ✔
+Pip3 is Installed. ✔
+```
 
+## Step 3: Fix PostgreSQL Permission Issue
+
+The default configuration doesn't work with Colima due to SSHFS permission restrictions. We need to modify the Docker Compose configuration.
+
+### 3.1 Create Docker Named Volume
+```bash
+docker volume create aws-mwaa-postgres-data
+```
+
+### 3.2 Backup Original Configuration
+```bash
+cp docker/docker-compose-local.yml docker/docker-compose-local.yml.backup
+```
+
+### 3.3 Modify docker-compose-local.yml
+
+Edit `docker/docker-compose-local.yml` and make the following changes:
+
+**Original problematic line (around line 14):**
+```yaml
+volumes:
+  - "${PWD}/db-data:/var/lib/postgresql/data"
+```
+
+**Replace with:**
+```yaml
+volumes:
+  - "aws-mwaa-postgres-data:/var/lib/postgresql/data"
+```
+
+**Add volumes section at the end of the file:**
+```yaml
+volumes:
+  aws-mwaa-postgres-data:
+    external: true
+```
+
+### 3.4 Complete Fixed docker-compose-local.yml
+
+Here's the complete fixed file content:
+
+```yaml
+version: "3.7"
+services:
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    volumes:
+      - "aws-mwaa-postgres-data:/var/lib/postgresql/data"
+
+  local-runner:
+    image: amazon/mwaa-local:2_10_3
+    restart: always
+    depends_on:
+      - postgres
+    environment:
+      - LOAD_EX=n
+      - EXECUTOR=Local
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    volumes:
+      - "${PWD}/dags:/usr/local/airflow/dags"
+      - "${PWD}/plugins:/usr/local/airflow/plugins"
+      - "${PWD}/requirements:/usr/local/airflow/requirements"
+      - "${PWD}/startup_script:/usr/local/airflow/startup"
+    ports:
+      - "8080:8080"
+    command: local-runner
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /usr/local/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    env_file:
+      - ./config/.env.localrunner
+
+volumes:
+  aws-mwaa-postgres-data:
+    external: true
+```
+
+## Step 4: Build and Start MWAA Environment
+
+### 4.1 Build Docker Image
 ```bash
 ./mwaa-local-env build-image
 ```
 
-**Note**: it takes several minutes to build the Docker image locally.
+This step takes several minutes. Expected output includes:
+```
+Successfully built [image-id]
+Successfully tagged amazon/mwaa-local:2_10_3
+```
 
-### Step two: Running Apache Airflow
-
-#### Local runner
-
-Runs a local Apache Airflow environment that is a close representation of MWAA by configuration.
-
+### 4.2 Start Local Environment
 ```bash
 ./mwaa-local-env start
 ```
 
-To stop the local environment, Ctrl+C on the terminal and wait till the local runner and the postgres containers are stopped.
+Expected output:
+```
+Creating network "aws-mwaa-local-runner-2_10_3_default" with the default driver
+Creating aws-mwaa-local-runner-2_10_3-postgres-1 ... done
+Creating aws-mwaa-local-runner-2_10_3-local-runner-1 ... done
+Attaching to aws-mwaa-local-runner-2_10_3-postgres-1, aws-mwaa-local-runner-2_10_3-local-runner-1
+```
 
-### Step three: Accessing the Airflow UI
+### 4.3 Verify Setup
+```bash
+# Check running containers
+docker ps
 
-By default, the `bootstrap.sh` script creates a username and password for your local Airflow environment.
+# Check logs
+docker logs aws-mwaa-local-runner-2_10_3-postgres-1 --tail 5
+docker logs aws-mwaa-local-runner-2_10_3-local-runner-1 --tail 10
+```
 
+### 4.4 Access Airflow UI
+- Open browser to: http://localhost:8080
 - Username: `admin`
 - Password: `test`
 
-#### Airflow UI
+## Step 5: File Structure and Modifications Summary
 
-- Open the Apache Airlfow UI: <http://localhost:8080/>.
+### Files Modified in aws-mwaa-local-runner:
+1. **docker/docker-compose-local.yml** - Modified PostgreSQL volume mount
+2. **docker/docker-compose-local.yml.backup** - Created as backup
 
-### Step four: Add DAGs and supporting files
+### Key Changes Made:
+- Changed PostgreSQL data storage from host directory bind mount to Docker named volume
+- Added external volume definition to compose file
 
-The following section describes where to add your DAG code and supporting files. We recommend creating a directory structure similar to your MWAA environment.
+### Directory Structure After Setup:
+```
+aws-mwaa-local-runner/
+├── SETUP_GUIDE_COLIMA.md          # This guide (new)
+├── COLIMA_TROUBLESHOOTING.md      # Troubleshooting doc (new)
+├── docker/
+│   ├── docker-compose-local.yml         # Modified
+│   ├── docker-compose-local.yml.backup  # Created
+│   └── ...
+├── dags/                          # Your DAGs go here
+├── plugins/                       # Custom plugins
+├── requirements/                  # Python requirements
+│   └── requirements.txt
+├── startup_script/               # Startup scripts
+│   └── startup.sh
+└── mwaa-local-env               # Main CLI script
+```
 
-#### DAGs
+## Step 6: Development Workflow
 
-1. Add DAG code to the `dags/` folder.
-2. To run the sample code in this repository, see the `example_dag_with_taskflow_api.py` file.
-
-#### Requirements.txt
-
-1. Add Python dependencies to `requirements/requirements.txt`.
-2. To test a requirements.txt without running Apache Airflow, use the following script:
-
+### 6.1 Adding DAGs
+Place your DAG files in the `dags/` directory:
 ```bash
+# Example
+cp your_dag.py dags/
+```
+
+### 6.2 Adding Python Dependencies
+Edit `requirements/requirements.txt`:
+```bash
+# Test requirements installation
 ./mwaa-local-env test-requirements
 ```
 
-Let's say you add `aws-batch==0.6` to your `requirements/requirements.txt` file. You should see an output similar to:
+### 6.3 Custom Plugins
+Place plugin files in `plugins/` directory.
 
+### 6.4 Startup Scripts
+Modify `startup_script/startup.sh` for custom initialization:
 ```bash
-Installing requirements.txt
-Collecting aws-batch (from -r /usr/local/airflow/dags/requirements.txt (line 1))
-  Downloading https://files.pythonhosted.org/packages/5d/11/3aedc6e150d2df6f3d422d7107ac9eba5b50261cf57ab813bb00d8299a34/aws_batch-0.6.tar.gz
-Collecting awscli (from aws-batch->-r /usr/local/airflow/dags/requirements.txt (line 1))
-  Downloading https://files.pythonhosted.org/packages/07/4a/d054884c2ef4eb3c237e1f4007d3ece5c46e286e4258288f0116724af009/awscli-1.19.21-py2.py3-none-any.whl (3.6MB)
-    100% |████████████████████████████████| 3.6MB 365kB/s
-...
-...
-...
-Installing collected packages: botocore, docutils, pyasn1, rsa, awscli, aws-batch
-  Running setup.py install for aws-batch ... done
-Successfully installed aws-batch-0.6 awscli-1.19.21 botocore-1.20.21 docutils-0.15.2 pyasn1-0.4.8 rsa-4.7.2
-```
-
-3. To package the necessary WHL files for your requirements.txt without running Apache Airflow, use the following script:
-
-```bash
-./mwaa-local-env package-requirements
-```
-
-For example usage see [Installing Python dependencies using PyPi.org Requirements File Format Option two: Python wheels (.whl)](https://docs.aws.amazon.com/mwaa/latest/userguide/best-practices-dependencies.html#best-practices-dependencies-python-wheels).
-
-#### Custom plugins
-
-- There is a directory at the root of this repository called plugins.
-- In this directory, create a file for your new custom plugin.
-- Add any Python dependencies to `requirements/requirements.txt`.
-
-**Note**: this step assumes you have a DAG that corresponds to the custom plugin. For example usage [MWAA Code Examples](https://docs.aws.amazon.com/mwaa/latest/userguide/sample-code.html).
-
-#### Startup script
-
-- There is a sample shell script `startup.sh` located in a directory at the root of this repository called `startup_script`.
-- If there is a need to run additional setup (e.g. install system libraries, setting up environment variables), please modify the `startup.sh` script.
-- To test a `startup.sh` without running Apache Airflow, use the following script:
-
-```bash
+# Test startup script
 ./mwaa-local-env test-startup-script
 ```
 
-## What's next?
+## Step 7: Common Operations
 
-- Learn how to upload the requirements.txt file to your Amazon S3 bucket in [Installing Python dependencies](https://docs.aws.amazon.com/mwaa/latest/userguide/working-dags-dependencies.html).
-- Learn how to upload the DAG code to the dags folder in your Amazon S3 bucket in [Adding or updating DAGs](https://docs.aws.amazon.com/mwaa/latest/userguide/configuring-dag-folder.html).
-- Learn more about how to upload the plugins.zip file to your Amazon S3 bucket in [Installing custom plugins](https://docs.aws.amazon.com/mwaa/latest/userguide/configuring-dag-import-plugins.html).
+### Start Environment
+```bash
+./mwaa-local-env start
+```
 
-## FAQs
+### Stop Environment
+Press `Ctrl+C` in the terminal running the containers.
 
-The following section contains common questions and answers you may encounter when using your Docker container image.
-
-### Can I test execution role permissions using this repository?
-
-- You can setup the local Airflow's boto with the intended execution role to test your DAGs with AWS operators before uploading to your Amazon S3 bucket. To setup aws connection for Airflow locally see [Airflow | AWS Connection](https://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/connections/aws.html)
-  To learn more, see [Amazon MWAA Execution Role](https://docs.aws.amazon.com/mwaa/latest/userguide/mwaa-create-role.html).
-- You can set AWS credentials via environment variables set in the `docker/config/.env.localrunner` env file. To learn more about AWS environment variables, see [Environment variables to configure the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html) and [Using temporary security credentials with the AWS CLI](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_use-resources.html#using-temp-creds-sdk-cli). Simply set the relevant environment variables in `.env.localrunner` and `./mwaa-local-env start`.
-
-### How do I add libraries to requirements.txt and test install?
-
-- A `requirements.txt` file is included in the `/requirements` folder of your local Docker container image. We recommend adding libraries to this file, and running locally.
-
-### What if a library is not available on PyPi.org?
-
-- If a library is not available in the Python Package Index (PyPi.org), add the `--index-url` flag to the package in your `requirements/requirements.txt` file. To learn more, see [Managing Python dependencies in requirements.txt](https://docs.aws.amazon.com/mwaa/latest/userguide/best-practices-dependencies.html).
-
-## Troubleshooting
-
-The following section contains errors you may encounter when using the Docker container image in this repository.
-
-### My environment is not starting
-
-- If you encountered [the following error](https://issues.apache.org/jira/browse/AIRFLOW-3678): `process fails with "dag_stats_table already exists"`, you'll need to reset your database using the following command:
-
+### Reset Database
 ```bash
 ./mwaa-local-env reset-db
 ```
 
-- If you are moving from an older version of local-runner you may need to run the above reset-db command, or delete your `./db-data` folder. Note, too, that newer Airflow versions have newer provider packages, which may require updating your DAG code.
+### View All Available Commands
+```bash
+./mwaa-local-env help
+```
 
-### Fernet Key InvalidToken
+### Clean Shutdown
+```bash
+# Stop containers
+docker-compose -p aws-mwaa-local-runner-2_10_3 -f ./docker/docker-compose-local.yml down
 
-A Fernet Key is generated during image build (`./mwaa-local-env build-image`) and is durable throughout all
-containers started from that image. This key is used to [encrypt connection passwords in the Airflow DB](https://airflow.apache.org/docs/apache-airflow/stable/security/secrets/fernet.html).
-If changes are made to the image and it is rebuilt, you may get a new key that will not match the key used when
-the Airflow DB was initialized, in this case you will need to reset the DB (`./mwaa-local-env reset-db`).
+# Stop Colima (optional)
+colima stop
+```
 
-## Security
+## Step 8: Data Management
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+### Backup PostgreSQL Data
+```bash
+docker run --rm -v aws-mwaa-postgres-data:/data -v $(pwd):/backup alpine tar czf /backup/postgres-backup.tar.gz -C /data .
+```
 
-## License
+### Restore PostgreSQL Data
+```bash
+docker run --rm -v aws-mwaa-postgres-data:/data -v $(pwd):/backup alpine sh -c "cd /data && tar xzf /backup/postgres-backup.tar.gz"
+```
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+### Remove All Data (Reset)
+```bash
+docker volume rm aws-mwaa-postgres-data
+docker volume create aws-mwaa-postgres-data
+```
+
+## Troubleshooting
+
+### Issue: Permission Denied Error
+If you see `chown: /var/lib/postgresql/data: Permission denied`, ensure you've applied the Docker named volume fix from Step 3.
+
+### Issue: Containers Won't Start
+1. Check Colima status: `colima status`
+2. Restart Colima: `colima stop && colima start`
+3. Check Docker connectivity: `docker ps`
+
+### Issue: Port 8080 Already in Use
+```bash
+# Find process using port 8080
+lsof -i :8080
+
+# Kill process if needed
+kill -9 <PID>
+```
+
+### Issue: Can't Access Airflow UI
+1. Wait 2-3 minutes for full startup
+2. Check container health: `docker ps`
+3. Check logs: `docker logs aws-mwaa-local-runner-2_10_3-local-runner-1`
+
+## Performance Considerations
+
+### Colima Configuration (Optional)
+For better performance, you can configure Colima with more resources:
+
+```bash
+# Stop current instance
+colima stop
+
+# Start with custom configuration
+colima start --cpu 4 --memory 8 --disk 60
+```
+
+## Security Notes
+
+- Default Airflow credentials are `admin/test` - change in production
+- Colima runs containers in an isolated VM
+- PostgreSQL data is stored in Docker volumes, not directly accessible from host
+
+## References
+
+- [Colima GitHub](https://github.com/abiosoft/colima)
+- [AWS MWAA Local Runner](https://github.com/aws/aws-mwaa-local-runner)
+- [Docker Volumes Documentation](https://docs.docker.com/storage/volumes/)
+
+---
+
+**Last Updated**: July 23, 2025  
+**Tested Environment**:
+- macOS with Apple Silicon
+- Colima v0.x.x
+- Docker v24.x.x
+- AWS MWAA Local Runner v2.10.3
